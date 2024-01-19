@@ -1,0 +1,521 @@
+---
+title: "giant_anteater_occ"
+author: "Matthew Hyde"
+date: "2023-12-05"
+output: html_document
+---
+
+```{r setup, include=FALSE, warning=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(unmarked)
+library(AICcmodavg)
+library(camtrapR)
+library(sf)
+library(sp)
+library(raster)
+library(elevatr)
+library(tmap)
+library(tmaptools)
+```
+
+# Stations 
+
+```{r}
+stations <- read.csv('C:/Users/matth/OneDrive - Colostate/Desktop/Bibliography/Anteaters/Original Data/dep_piedemonte.csv')
+stations$start_date <- as.Date(stations$start_date, format = '%m/%d/%Y')
+stations$end_date <- as.Date(stations$end_date, format = '%m/%d/%Y')
+stations <- stations[,1:7]
+stations <- stations %>%
+  mutate(Session = ifelse(as.Date(start_date) < as.Date("2021-11-01"), 1, 2))
+
+
+stations1 <- read.csv('C:/Users/matth/OneDrive - Colostate/Desktop/Bibliography/Anteaters/Original Data/dep_sabana.csv')
+stations1$placename <- stations1$deployment_id
+stations1 <- stations1[,1:7]
+
+stations1$Session <- 1
+stations1$start_date <- as.Date(stations1$start_date)
+stations1$end_date <- as.Date(stations1$end_date)
+stations <- bind_rows(stations,stations1)
+
+
+##Cam-op-MAtrix####
+head(stations)
+class(stations)
+dateFormat <- "%m/%d/%Y"
+
+str(stations)
+
+stations <- stations %>%
+  filter(deployment_id != "CTPR109") # this station doesn't have valid coordinates
+
+#write.csv(stations, "stations_ready.csv") ##save CSV with dates in the right format
+```
+
+# covariates for data
+
+## Slope and elevation
+```{r}
+sarea <- read_sf("C:/Users/matth/OneDrive - Colostate/Desktop/Bibliography/Anteaters/mcp.shp")
+GAproj <- terra::crs(sarea)
+elev <- get_elev_raster(sarea,
+                        prj = "EPSG: 32619",
+                        z=5) # import elevation data
+slope <- terra::terrain(elev, v = "slope", units = 'degrees')
+
+CT_shp <- stations
+coordinates(CT_shp)= ~longitude+latitude
+proj4string(CT_shp)<- CRS("+proj=longlat +datum=WGS84")
+terra::crs(CT_shp)
+terra::crs(elev)
+
+CT_shp <- spTransform(CT_shp, CRS("+init=epsg:32619"))
+CT_shp <- terra::vect(CT_shp)
+elev<-as(elev,"SpatRaster")
+slope <- as(slope,"SpatRaster")
+# buffer the points
+CT_buf <- buffer(CT_shp, 500)
+buffers <-st_as_sf(CT_buf)
+tmap_mode("view")
+#plot the buffers to make sure they're in the right spot
+tm_shape(buffers) +
+  tm_borders() +
+  tm_layout(frame = FALSE)
+
+
+CT_elev <- terra::extract(elev,CT_buf,fun = mean)
+CT_elev <- as.matrix(CT_elev)
+stations$elev <- CT_elev[,2]
+
+CT_slope <- terra::extract(slope,CT_buf,fun=mean)
+stations$slope <- CT_slope$slope
+```
+
+## Rasters
+
+```{r}
+lulc <- terra::rast("F:/working_pubs/anteater/lulc.tif")
+NDVI20 <- terra::rast("F:/working_pubs/anteater/NDVI_2020_v31.tif")
+NDVI21 <- terra::rast("F:/working_pubs/anteater/NDVI_2021v31.tif")
+roads <- terra::rast("F:/working_pubs/anteater/ed_roads_f1.tif")
+ghm <- terra::rast("F:/working_pubs/anteater/GHM.tif")
+fcover <- terra::rast("F:/working_pubs/anteater/fcover.tif")
+
+#lulc 
+lulc_CT<-terra::extract(lulc,CT_shp)
+stations$lulc <- lulc_CT$lulc
+#roads
+roads_ed <- terra::extract(roads, CT_buf, fun = mean)
+stations$roads <- roads_ed$ed_roads_f1
+#NDVI
+NDVI_CT1 <- terra::extract(NDVI20, CT_buf,fun=mean)
+stations$ndvi20 <- NDVI_CT1$ndvi
+#NDVI2
+NDVI_CT2 <- terra::extract(NDVI21, CT_buf,fun=mean)
+stations$ndvi21 <- NDVI_CT2$ndvi
+# global human modification
+ghmct <- terra::extract(ghm, CT_buf, fun=mean)
+stations$ghm <- ghmct$gHM
+# forest cover
+fcov <- terra::extract(fcover, CT_buf, fun = mean)
+stations$forcov <- fcov$fcover
+
+# check correlation between covariates
+library(GGally)
+ggpairs(stations, 9:16)
+
+#ggpairs(stations, c(9:10,15:16) )
+
+## correlation between elevation and roads, does it matter?
+```
+
+# check stations data before creating the UMF
+
+```{r}
+##Creating operation matrix
+cams <- cameraOperation(CTtable      = stations,
+                            stationCol   = "deployment_id",
+                            sessionCol   = "Session",
+                            setupCol     = "start_date",
+                            retrievalCol = "end_date",
+                            hasProblems  = F,
+                            dateFormat   = "ymd")
+
+#####**Creation of detection history matrix**####
+pdm <- read.csv("preprocess/hormigueros_pdm.csv")  ##data base with species, dates and stations
+sab <- read.csv('preprocess/hormigueros_sab.csv')
+RecordTaSA <- bind_rows(pdm,sab)
+##If you need a column of date+time, you first need to be sure the class of the
+##column date and time re correct:
+summary(RecordTaSA)
+
+RecTDate<- as.Date(RecordTaSA$timestamp, format='%m/%d/%Y')
+
+#RecordTaSA$timestamp <- as.Date(RecordTaSA$timestamp, format = '%m/%d/%Y')
+class(RecTDate)
+RecordTaSA$Date<-RecTDate #replace the corrected column as date to the main DB
+
+RecTTime <- as.POSIXct(RecordTaSA$timestamp, format = "%m/%d/%Y %H:%M",
+                       tz="America/Bogota")
+
+class(RecTTime)
+
+RecordTaSA$DateTime<-RecTTime   #replace corrected DateTime column
+RecordTaSA$DateTime<-RecTTime + 1
+
+##detection history
+dh <- detectionHistory(           recordTable          = RecordTaSA,
+                                  camOp                = cams,
+                                  stationCol           = "deployment_id",
+                                  speciesCol           = "genus",
+                                  recordDateTimeCol    = "DateTime",
+                                  species              = "Myrmecophaga",
+                                  occasionLength       =  14, #select your own occassion length
+                                  day1                 = "station",
+                                  includeEffort        = TRUE,
+                                  scaleEffort = FALSE,
+                                  timeZone = "America/Bogota",
+                                  writecsv = F,
+                                  unmarkedMultFrameInput = TRUE)
+
+df <- dh$detection_history
+dfs <- bind_cols(stations,df)
+
+
+dfpdm <- dfs %>%
+  filter(project_id == 2002517)
+rest <- dfs %>%
+  filter(project_id != 2002517)
+
+ps1 <- dfpdm[,1:22]
+ps1 <- ps1 %>%
+  filter(Session == 1)
+ps2 <- dfpdm %>%
+  filter(Session==2)
+ps2 <-ps2[,c(3,23:28)]
+check <- anti_join(ps1,ps2)
+check2 <- anti_join(ps2,ps1)
+
+ps1 <- ps1 %>%
+  filter(placename != "CTPC_001") %>%
+  filter(placename != "CTPC_013") %>%
+  filter(placename != "CTPC_119") %>%
+  filter(placename != "CTPC_150") %>%
+  filter(placename != "CTPC_026") %>%
+  filter(placename != "CTPC_056") %>%
+  filter(placename != "CTPC_035")
+
+ps2 <- ps2 %>%
+  filter(placename != "CTPC_064") %>%
+  filter(placename != "CTPC_122")
+
+dhpdm <- bind_cols(ps1,ps2)
+dhpdm <- dhpdm[,c(1:22,24:29)]
+
+# get the ones that were unique to each session
+dfunique <- dfs %>%
+  filter(placename == "CTPC_064") %>%
+  filter(placename == "CTPC_122") %>%
+  filter(placename == "CTPC_001") %>%
+  filter(placename == "CTPC_013") %>%
+  filter(placename == "CTPC_119") %>%
+  filter(placename == "CTPC_150") %>%
+  filter(placename == "CTPC_026") %>%
+  filter(placename == "CTPC_056") %>%
+  filter(placename == "CTPC_035")
+
+GA <- bind_rows(dhpdm,rest)
+x <- anti_join(dfs,GA, by = "placename")
+GA <- bind_rows(GA,x)
+
+GA <- GA %>%
+  filter(placename != "CTPC_151") # doesn't have forest cover covariate
+
+GA <- GA[,1:27]
+
+
+## to find records that need to be corrected
+GA_err <- RecordTaSA %>%
+  filter(genus == "Myrmecophaga") 
+
+GA_err$newdate <- as.Date(GA_err$Date)
+
+class(GA_err$newdate)
+# filter for all records before first date of camera trapping
+GA_err1 <- subset(GA_err, newdate < as.Date("2020-07-11"))
+# filter for dates after last camera is off
+GA_err_after <- subset(GA_err, newdate > as.Date("2022-09-27"))
+
+GA_errors <- rbind(GA_err1,GA_err_after)
+
+#write_csv(GA_errors, "myr_errors.csv")
+```
+
+
+# Create UMF and run some models
+```{r}
+GAred <- GA %>%
+  filter(elev < 500)
+GA_umf <- unmarkedFrameOccu(y=GAred[17:28], 
+                            siteCovs = GAred[c(1,8:16)]) # create unmarked dataframe
+
+# detection models
+
+um1 <- occu(~scale(roads) + (1|Session)+(1|project_id) ~scale(ndvi21)+scale(elev),
+             data = GA_umf)
+um2 <- occu(~scale(roads) + (1|Session)+(1|project_id) ~lulc+scale(ghm),
+             data = GA_umf)
+um3 <- occu(~1 ~scale(ghm),
+             data = GA_umf)
+um4 <- occu(~scale(roads) + (1|Session)+(1|project_id) ~scale(forcov)+scale(roads),
+             data = GA_umf)
+um5 <- occu(~scale(roads)~scale(forcov)+scale(roads),
+             data = GA_umf)
+um6 <- occu(~(1|Session)+(1|project_id)~scale(elev),
+             data = GA_umf)
+
+
+detlist <- list(um1,um2,um3,um4,um5,um6)
+detaic<- aictab(detlist)
+
+state.pred <- predict(um1, type = 'state')
+det.pred <- predict(um1, type = 'det')
+p.pred <- matrix(det.pred[,1], nrow = length(GA), byrow = TRUE) # reformat
+p.LCL <- matrix(det.pred[,3], nrow = length(GA), byrow = TRUE)  # reformat
+p.UCL <- matrix(det.pred[,4], nrow = length(GA), byrow = TRUE)  # reformat
+p.pred
+
+ghmpred <- as.numeric(GA$ghm)
+roads <- as.numeric(GA$roads)
+ooo <- order(ghmpred)       # order of elevation data
+oos <- order(roads)
+par(mfrow = c(1, 2), mar = c(5,5,4,2), cex.lab = 1.5, cex.axis = 1.5)
+
+# Occupancy
+plot(ghmpred[ooo], state.pred[ooo,1], xlab = 'GHM index', ylab = 'Occupancy probability', frame = FALSE, col = 'blue', lwd = 3, main = 'State process', type = 'l', ylim = c(0, 1))
+lines(ghmpred[ooo], occ.prob[ooo], lwd = 3, col = 'red')
+#detection
+plot(slope_i[ooo], det.pred[ooo,1], xlab = 'Slope index', ylab = 'Detection probability', frame = FALSE, col = 'blue', lwd = 3, main = 'State process', type = 'l', ylim = c(0, 1))
+#slope on occupancy
+plot(roads[oos], state.pred[oos,1], xlab = 'Slope index', ylab = 'Occupancy probability', frame = FALSE, col = 'blue', lwd = 3, main = 'State process', type = 'l', ylim = c(0, 1))
+lines(roads[oos], occ.prob[oos], lwd = 3, col = 'red')
+
+mb.gof.test(um3, bootstrap = 1000) # check GOF of the data
+
+
+newsky<-data.frame(ndvi21=seq(0, 268, length.out=268))
+pred.p<-predict(um1, type="state", newdata=newsky)
+
+plot(1, xlim=c(0,1), ylim=c(0,1), type="n", axes=T, xlab="NDVI",
+     pch=20, ylab="Occupancy Probability", family="serif",
+     cex.lab=1.25, cex.main=1.75)
+
+lines(newsky$ndvi21, pred.p$Predicted, col="black", lwd=2)
+lines(newsky$ndvi21, pred.p$lower, lty=2, col="black")
+lines(newsky$ndvi21, pred.p$upper, lty=2, col="black")
+
+####
+
+newsky1<-data.frame(elev=seq(0, 268, length.out=268))
+pred.p<-predict(um3, type="state", newdata=newsky1)
+
+plot(1, xlim=c(0,1), ylim=c(0,1), type="n", axes=T, xlab="GHM",
+     pch=20, ylab="Occupancy Probability", family="serif",
+     cex.lab=1.25, cex.main=1.75)
+
+lines(newsky1$ghm, pred.p$Predicted, col="black", lwd=2)
+lines(newsky1$ghm, pred.p$lower, lty=2, col="black")
+lines(newsky1$ghm, pred.p$upper, lty=2, col="black")
+
+
+newsky2<-data.frame(roads=seq(0, 268, length.out=268))
+pred.p<-predict(um1, type="det", newdata=newsky2)
+
+plot(1, xlim=c(0,268), ylim=c(0,1), type="n", axes=T, xlab="Elevation (m)",
+     pch=20, ylab="Occupancy Probability", family="serif",
+     cex.lab=1.25, cex.main=1.75)
+
+lines(newsky2$roads, pred.p$Predicted, col="black", lwd=2)
+lines(newsky2$roads, pred.p$lower, lty=2, col="black")
+lines(newsky2$roads, pred.p$upper, lty=2, col="black")
+
+#confint(um3, type="state")
+
+
+
+```
+
+
+# spOccupancy test
+
+```{r}
+library(spOccupancy)
+det.covs <- list(ID = as.vector(GA$project_id),
+                 lulc = as.vector(GA$lulc),
+                 session = as.vector(GA$Session))
+gaData <- list(y=GA[17:28],
+               occ.covs = GA[9:16],
+               det.covs = GA[6:16],
+               coords = cbind(GA[4], GA[5])
+)
+
+str(gaData)
+
+occ.form <- ~scale(elev)
+det.form <- ~1
+
+distMat <- dist(gaData$coords)
+
+# inits
+TI.inits <- list(alpha = 0, 
+                 beta = 0, 
+                 z = apply(gaData$y, 1, max, na.rm = TRUE), 
+                 sigma.sq = 2, 
+                 phi = 3 / mean(distMat), 
+                 nu = 1,
+                 w = rep(0, nrow(gaData$y)))
+
+# tuning parameter
+TI.tuning <- list(phi = 1, nu = 1)
+# priors
+min.dist <- min(distMat)
+max.dist <- max(distMat)
+TI.priors <- list(beta.normal = list(mean = 0, var = 2.72), 
+                    alpha.normal = list(mean = 0, var = 2.72),
+                    sigma.sq.ig = c(2, 1), 
+                    phi.unif = c(3/max.dist, 3/min.dist),
+                    nu.unif = c(0.001, 3) )
+
+# non-spatial model
+out0 <- PGOcc(occ.formula = occ.hyp$occ2,
+               det.formula = det.form,
+               data = gaData,
+               n.samples = 1000,
+               n.omp.threads = 1,
+               n.burn = 200,
+               n.thin = 1,
+               n.chains = 3,
+               verbose = FALSE)
+?PGOcc
+summary(out0)
+cov.model <- "exponential"
+# create a list for the hypotheses
+occ.hyp <- list(occ1 = ~1,
+                occ2 = ~scale(GA$elev),
+                occ3 = ~scale(GA$ghm),
+                occ4 = ~scale(GA$forcov),
+                occ5 = ~scale(GA$elev) +scale(GA$forcov))
+
+det.hyp <- list(det1 = ~1,
+                det2 = ~I(GA$Session))
+
+# spatial model
+set.seed(10)
+out1a <- 
+    spPGOcc(occ.formula = occ.hyp$occ1, 
+       det.formula = det.form, 
+       data = gaData, 
+       n.batch = 100, batch.length = 50,
+       tuning = TI.tuning,
+       inits = TI.inits,
+       cov.model = cov.model, 
+       NNGP = TRUE, n.neighbors = 5, 
+       n.omp.threads = 6,
+       n.burn = 2000, n.thin = 3, n.chains = 4, 
+       n.report = 100, verbose = TRUE)
+
+summary(out1a)
+
+ppc.out <- ppcOcc(out1a, fit.stat = 'freeman-tukey', group = 1)
+summary(ppc.out)
+
+plot(out1a$beta.samples) 
+plot(out1a$alpha.samples)
+plot(out1a$theta.samples)
+
+waic1 <- waicOcc(out1a)
+waic1
+
+out2a <- 
+    spPGOcc(occ.formula = occ.hyp$occ2, 
+       det.formula = det.hyp$det2, 
+       data = gaData, 
+       n.batch = 100, batch.length = 50,
+       tuning = TI.tuning,
+       inits = TI.inits,
+       cov.model = cov.model, 
+       NNGP = TRUE, n.neighbors = 5, 
+       n.omp.threads = 6,
+       n.burn = 2000, n.thin = 3, n.chains = 4, 
+       n.report = 100, verbose = TRUE)
+
+summary(out2a)
+ppc.out2 <- ppcOcc(out2a, fit.stat = 'freeman-tukey', group = 1)
+summary(ppc.out2)
+waic2 <- waicOcc(out2a)
+waic2
+
+
+out3a <- 
+    spPGOcc(occ.formula = occ.hyp$occ3, 
+       det.formula = det.form, 
+       data = gaData, 
+       n.batch = 100, batch.length = 50,
+       tuning = TI.tuning,
+       inits = TI.inits,
+       cov.model = cov.model, 
+       NNGP = TRUE, n.neighbors = 5, 
+       n.omp.threads = 6,
+       n.burn = 2000, n.thin = 3, n.chains = 4, 
+       n.report = 100, verbose = TRUE)
+
+summary(out3a)
+ppc.out3 <- ppcOcc(out3a, fit.stat = 'freeman-tukey', group = 1)
+summary(ppc.out3)
+waic3 <- waicOcc(out3a)
+waic3
+
+
+out4a <- 
+    spPGOcc(occ.formula = occ.hyp$occ4, 
+       det.formula = det.form, 
+       data = gaData, 
+       n.batch = 100, batch.length = 50,
+       tuning = TI.tuning,
+       inits = TI.inits,
+       cov.model = cov.model, 
+       NNGP = TRUE, n.neighbors = 5, 
+       n.omp.threads = 6,
+       n.burn = 2000, n.thin = 3, n.chains = 4, 
+       n.report = 100, verbose = TRUE)
+
+summary(out4a)
+ppc.out4 <- ppcOcc(out4a, fit.stat = 'freeman-tukey', group = 1)
+summary(ppc.out4)
+waic4 <- waicOcc(out4a)
+waic4
+
+out5a <- 
+    spPGOcc(occ.formula = occ.hyp$occ5, 
+       det.formula = det.form, 
+       data = gaData, 
+       n.batch = 100, batch.length = 50,
+       tuning = TI.tuning,
+       inits = TI.inits,
+       cov.model = cov.model, 
+       NNGP = TRUE, n.neighbors = 5, 
+       n.omp.threads = 6,
+       n.burn = 2000, n.thin = 3, n.chains = 4, 
+       n.report = 100, verbose = TRUE)
+
+summary(out5a)
+ppc.out5 <- ppcOcc(out5a, fit.stat = 'freeman-tukey', group = 1)
+summary(ppc.out5)
+waic5 <- waicOcc(out5a)
+waic5
+
+
+
+
+```
