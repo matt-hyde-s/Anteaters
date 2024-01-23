@@ -22,7 +22,7 @@ library(tmaptools)
 # Stations 
 
 ```{r}
-stations <- read.csv('C:/Users/matth/OneDrive - Colostate/Desktop/Bibliography/Anteaters/Original Data/dep_piedemonte.csv')
+stations <- read.csv('dep_piedemonte.csv')
 stations$start_date <- as.Date(stations$start_date, format = '%m/%d/%Y')
 stations$end_date <- as.Date(stations$end_date, format = '%m/%d/%Y')
 stations <- stations[,1:7]
@@ -30,7 +30,7 @@ stations <- stations %>%
   mutate(Session = ifelse(as.Date(start_date) < as.Date("2021-11-01"), 1, 2))
 
 
-stations1 <- read.csv('C:/Users/matth/OneDrive - Colostate/Desktop/Bibliography/Anteaters/Original Data/dep_sabana.csv')
+stations1 <- read.csv('dep_sabana.csv')
 stations1$placename <- stations1$deployment_id
 stations1 <- stations1[,1:7]
 
@@ -57,7 +57,7 @@ stations <- stations %>%
 
 ## Slope and elevation
 ```{r}
-sarea <- read_sf("C:/Users/matth/OneDrive - Colostate/Desktop/Bibliography/Anteaters/mcp.shp")
+sarea <- read_sf("mcp.shp")
 GAproj <- terra::crs(sarea)
 elev <- get_elev_raster(sarea,
                         prj = "EPSG: 32619",
@@ -128,6 +128,8 @@ ggpairs(stations, 9:16)
 #ggpairs(stations, c(9:10,15:16) )
 
 ## correlation between elevation and roads, does it matter?
+
+rm(NDVI21,NDVI20,NDVI_CT1,NDVI_CT2,lulc_CT,ghmct,ghm,lulc,roads,roads_ed,slope,fcov,fcover)
 ```
 
 # check stations data before creating the UMF
@@ -143,8 +145,8 @@ cams <- cameraOperation(CTtable      = stations,
                             dateFormat   = "ymd")
 
 #####**Creation of detection history matrix**####
-pdm <- read.csv("preprocess/hormigueros_pdm.csv")  ##data base with species, dates and stations
-sab <- read.csv('preprocess/hormigueros_sab.csv')
+pdm <- read.csv('hormigueros_pdm.csv')  ##data base with species, dates and stations
+sab <- read.csv('hormigueros_sab.csv')
 RecordTaSA <- bind_rows(pdm,sab)
 ##If you need a column of date+time, you first need to be sure the class of the
 ##column date and time re correct:
@@ -234,7 +236,12 @@ GA <- GA %>%
 
 GA <- GA[,1:27]
 
+rm(check,check2,buffers,cams,CT_shp,CT_elev,CT_buf,CT_slope,df,dfpdm,dfs,dfunique,dh,dhpdm,pdm,ps1,ps2,RecordTaSA,rest,sab,sarea,stations,stations1,x,elev)
 
+```
+
+## For finding errors
+```{r}
 ## to find records that need to be corrected
 GA_err <- RecordTaSA %>%
   filter(genus == "Myrmecophaga") 
@@ -250,6 +257,127 @@ GA_err_after <- subset(GA_err, newdate > as.Date("2022-09-27"))
 GA_errors <- rbind(GA_err1,GA_err_after)
 
 #write_csv(GA_errors, "myr_errors.csv")
+
+
+```
+
+
+# multispecies occupancy
+```{r}
+ylist <- list(GiantAnteater = as.matrix(GA[,17:27]),
+              SouthernTamandua = as.matrix(TA[,17:27]))
+
+sitecovs <- GA[,9:16]
+
+umf <- unmarkedFrameOccuMulti(y=ylist, siteCovs=sitecovs)
+head(umf)
+
+stateformulas = list(smod1 = c("~scale(elev)","~scale(elev)","~1"),
+                     smod2 = c("~scale(ghm)","~scale(elev)","~1"),
+                     smod3 = c("~scale(roads)","~scale(elev)","~scale(ghm)"))
+
+detformulas = list(dmod1 = c("~1","~1"),
+                   dmod2 = c("~1","~1"))
+
+mod1 <- occuMulti(detformulas=detformulas$dmod1, stateformulas=stateformulas$smod1, data=umf)
+mod1 # estimates on logit scale
+
+mod2 <- occuMulti(detformulas=detformulas$dmod2, stateformulas=stateformulas$smod2, data=umf)
+mod2 # estimates on logit scale
+
+mod3 <- occuMulti(detformulas=detformulas$dmod2, stateformulas=stateformulas$smod3, data=umf)
+mod3 # estimates on logit scale
+
+# create a list to compare the models
+models = list(mod1,mod2,mod3)
+# AIC values for models
+model.selection <- aictab(models)
+
+
+
+
+```
+
+## plotting results
+```{r}
+occ_prob <- predict(mod1, type="state")
+
+lapply(occ_prob, head)
+
+head(apply(occ_prob$Predicted, 1, sum))
+
+GA_marginal <- predict(mod1, type="state", species="GiantAnteater")
+GA_marginal
+
+
+TA_marginal <- predict(mod1, type='state', species="SouthernTamandua") # get coyote
+marg_plot_dat <- rbind(GA_marginal[1,], TA_marginal[1,])
+marg_plot_dat$Species <- c("GiantAnteater", "SouthernTamandua")
+marg_plot_dat
+
+
+plot(1:2, marg_plot_dat$Predicted, ylim=c(0.1,1.0), 
+     xlim=c(0.5,2.5), pch=19, cex=1.5, xaxt='n', 
+     xlab="", ylab="Marginal occupancy and 95% CI")
+axis(1, at=1:2, labels=marg_plot_dat$Species)
+
+# CIs
+top <- 0.1
+for (i in 1:2){
+  segments(i, marg_plot_dat$lower[i], i, marg_plot_dat$upper[i])
+  segments(i-top, marg_plot_dat$lower[i], i+top)
+  segments(i-top, marg_plot_dat$upper[i], i+top)
+}
+
+GA_TA <- predict(mod1, type="state", species="GiantAnteater", cond="SouthernTamandua")
+head(GA_TA)
+
+GA_noTA <- predict(mod1, type="state", species="GiantAnteater", cond="SouthernTamandua")
+head(GA_noTA)
+
+
+plot_data <- rbind(GA_TA[1,], GA_noTA[1,])
+plot_data$SouthernTamandua_status <- c("Present","Absent")
+head(plot_data)
+
+plot(1:2, plot_data$Predicted, ylim=c(0, 1.0), 
+     xlim=c(0.5,2.5), pch=19, cex=1.5, xaxt='n', 
+     xlab="Tamandua status", ylab="Giant anteater conditional occupancy and 95% CI")
+axis(1, at=1:2, labels=plot_data$SouthernTamandua_status)
+
+# CIs
+top <- 0.1
+for (i in 1:2){
+  segments(i, plot_data$lower[i], i, plot_data$upper[i])
+  segments(i-top, plot_data$lower[i], i+top)
+  segments(i-top, plot_data$upper[i], i+top)
+}
+
+# try the opposite
+GA_TA <- predict(mod1, type="state", species="SouthernTamandua", cond="GiantAnteater")
+head(GA_TA)
+
+GA_noTA <- predict(mod1, type="state", species="SouthernTamandua", cond="GiantAnteater")
+head(GA_noTA)
+
+
+plot_data <- rbind(GA_TA[1,], GA_noTA[1,])
+plot_data$SouthernTamandua_status <- c("Present","Absent")
+head(plot_data)
+
+plot(1:2, plot_data$Predicted, ylim=c(0, 1.0), 
+     xlim=c(0.5,2.5), pch=19, cex=1.5, xaxt='n', 
+     xlab="Giant Anteater status", ylab="Tamandua conditional occupancy and 95% CI")
+axis(1, at=1:2, labels=plot_data$SouthernTamandua_status)
+
+# CIs
+top <- 0.1
+for (i in 1:2){
+  segments(i, plot_data$lower[i], i, plot_data$upper[i])
+  segments(i-top, plot_data$lower[i], i+top)
+  segments(i-top, plot_data$upper[i], i+top)
+}
+
 ```
 
 
